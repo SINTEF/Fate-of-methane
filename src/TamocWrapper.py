@@ -100,7 +100,7 @@ def get_kw(windspeed, variance, Sc = 660):
 #### Helper function for running a Tamoc simulation ####
 ########################################################
 
-def run_tamoc(z0, d0, profile, silence = True, delta_t=0.1):
+def run_tamoc_sbm(z0, d0, profile, silence = True, delta_t=0.1, t_hyd=None):
     '''
     Runs a Tamoc simulation with the single-bubble model,
     for a given case, season, initial depth and initial bubble size.
@@ -120,6 +120,8 @@ def run_tamoc(z0, d0, profile, silence = True, delta_t=0.1):
         If silence == True, then capture and hide this output.
     delta_t : float, optional
         Output interval from tamoc (passed to scipy integrator)
+    return_radius : bool, optional
+        If True, return the bubble radius development
 
     Returns
     -------
@@ -148,17 +150,21 @@ def run_tamoc(z0, d0, profile, silence = True, delta_t=0.1):
     # Order is the same as composition above.
     mol_frac = np.array([1.0, 0.0, 0.0])
 
-    # Get the  temperature at the release depth.
+
+    # Get the temperature at the release depth
+    # (we assume bubble has ambient temperature)
     T0 = profile.get_values(z0, ['temperature'])
 
     # When this much mass remains, terminate the simulation.
     fdis = 1.e-12
 
     # Also, use the hydrate model from Jun et al. (2015) to set the
-    # hydrate shell formation time.
-    P = profile.get_values(z0, 'pressure')
-    m = bub.masses_by_diameter(d0, T0, P, mol_frac)
-    t_hyd = dispersed_phases.hydrate_formation_time(bub, z0, m, T0, profile)
+    # hydrate shell formation time, unless provided
+    if t_hyd is None:
+        # Get the pressure at the release depth.
+        P = profile.get_values(z0, 'pressure')
+        m = bub.masses_by_diameter(d0, T0, P, mol_frac)
+        t_hyd = dispersed_phases.hydrate_formation_time(bub, z0, m, T0, profile)
 
     # Simulate the bubble rising through the water column.
     # Use context manager to prevent Tamoc from printing output if silence is True
@@ -173,6 +179,11 @@ def run_tamoc(z0, d0, profile, silence = True, delta_t=0.1):
     with context_manager:
         sbm.simulate(bub, z0, d0, mol_frac, T0, K_T=1, fdis=fdis,
                 t_hyd=t_hyd, delta_t=delta_t)
+
+    return bub, sbm
+
+
+def parse_tamoc_sbm_results(sbm, z0):
 
     # The results of the simulation are stored as an array in sbm.y.
     # Depth at each step is stored as sbm.y[:,2].
@@ -207,5 +218,18 @@ def run_tamoc(z0, d0, profile, silence = True, delta_t=0.1):
     else:
         direct = 0.0
 
-    return depth, deposited, direct
+    return depth, fraction, deposited, direct
 
+
+def get_bubble_diameter(bub, sbm, profile):
+
+    z = sbm.y[:,2]
+    d = np.zeros_like(z)
+
+    for i in range(len(z)):
+        m = sbm.y[i,3:-1]
+        # Get the ambient profile data
+        Ta, Sa, P = profile.get_values(z[i], ['temperature', 'salinity', 'pressure'])
+        d[i] = bub.diameter(m, Ta, P)
+
+    return z, d
