@@ -221,7 +221,7 @@ def parse_tamoc_sbm_results(sbm, z0):
     return depth, fraction, deposited, direct
 
 
-def get_bubble_diameter(bub, sbm, profile):
+def get_bubble_diameter(bub, sbm, profile, dirty_size=None):
 
     z = sbm.y[:,2]
     d = np.zeros_like(z)
@@ -232,4 +232,8 @@ def get_bubble_diameter(bub, sbm, profile):
         Ta, Sa, P = profile.get_values(z[i], ['temperature', 'salinity', 'pressure'])
         d[i] = bub.diameter(m, Ta, P)
 
-    return z, d
+    if dirty_size is not None:
+        t_dirty = sbm.t[np.argmin(np.abs(d - dirty_size))]
+        return z, d, t_dirty
+    else:
+        return z, d

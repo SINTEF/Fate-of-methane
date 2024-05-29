@@ -61,17 +61,17 @@ def get_system_matrices(Nx, dx, dt, K, Q, kw):
     # where z_{-1/2} is the sea surface and z_{N-1/2} is the sea floor
 
     # Upper diagonal
-    upper = -a*K[1:-1]
+    upper = -a*K[1:-1].astype(np.float64)
     # Main diagonal
-    main = a*K[1:] + a*K[:-1] + b*Q
+    main = a*K[1:].astype(np.float64) + a*K[:-1].astype(np.float64) + b*Q
     # Lower diagonal
-    lower = -a*K[1:-1]
+    lower = -a*K[1:-1].astype(np.float64)
 
     # Overwrite boundary points to handle boundary conditions
     # Prescribed-flux BC at surface
-    main[0]  =  a*K[1] + b*kw/dx + b*Q
+    main[0]  =  a*K[1].astype(np.float64) + b*kw/dx + b*Q
     # No-diffusive-flux BC at sea floor
-    main[-1] =  a*K[-2] + b*Q
+    main[-1] =  a*K[-2].astype(np.float64) + b*Q
     # Create sparse matrix
     L  = diags(diagonals = [ upper, 1 + main,  lower], offsets = [1, 0, -1])
     R  = diags(diagonals = [-upper, 1 - main, -lower], offsets = [1, 0, -1])
@@ -80,7 +80,7 @@ def get_system_matrices(Nx, dx, dt, K, Q, kw):
     #print('FVM, R: ', R.todense()[:3,:3])
     return L, R
 
-def diffusion_solver(X, C0, K, Tmax, dt, Q = 0, kw = 0, K_times = None):
+def diffusion_solver(X, C0, K, Tmax, dt, t0=0, Q=0, kw=0, K_times=None, kw_times=None, loop=True, threshold=1e-9):
     '''
     This function solves the diffusion-reaction equation, using
     2nd-order central space discretisation and the Crank-Nicolson
@@ -134,8 +134,8 @@ def diffusion_solver(X, C0, K, Tmax, dt, Q = 0, kw = 0, K_times = None):
     # Check for consistency of input
     if K_times is not None:
         assert len(K.shape) == 2
-        assert K.shape[0] == len(X) + 1
-        assert K.shape[1] == len(K_times)
+        assert K.shape[0] == len(K_times)
+        assert K.shape[1] == len(X) + 1
     else:
         assert len(K.shape) == 1
         assert K.shape[0] == len(X) + 1
@@ -144,7 +144,15 @@ def diffusion_solver(X, C0, K, Tmax, dt, Q = 0, kw = 0, K_times = None):
     dx = X[1] - X[0]
 
     Nx = X.size
-    Nt = int(Tmax / dt)
+    Nt = int((Tmax - t0) / dt)
+
+    #print('Diffusionsolver')
+    #print(dx)
+    #print(X)
+    #print(C0)
+    #print(K)
+    #print(t0)
+    #print(Tmax)
 
     # 2D array to hold concetration results
     C      = np.zeros((Nt+1, Nx))
@@ -152,13 +160,26 @@ def diffusion_solver(X, C0, K, Tmax, dt, Q = 0, kw = 0, K_times = None):
     evap   = np.zeros(Nt+1)
     biod   = np.zeros(Nt+1)
 
+    if kw_times is None:
+        # In this case, kw is a float
+        kw_now = kw
+    else:
+        # In this case, kw is an array
+        i = np.argmin(np.abs(kw_times-t0))
+        kw_now = kw[i]
     # System matrices for Crank-Nicolson solver
     if K_times is None:
         # In this case, K is a 1D array
-        L, R = get_system_matrices(Nx, dx, dt, K, Q, kw)
+        L, R = get_system_matrices(Nx, dx, dt, K, Q, kw_now)
     else:
         # In this case, K is a 2D array
-        L, R = get_system_matrices(Nx, dx, dt, K[:,0], Q, kw)
+        i = np.argmin(np.abs(K_times-t0))
+        L, R = get_system_matrices(Nx, dx, dt, K[i,:], Q, kw_now)
+
+    #print('Trace L = ', np.sum(L.diagonal(0)))
+    #print('Trace R = ', np.sum(R.diagonal(0)))
+    #print(Nx, dx, dt, np.sum(K[i,:]), Q, kw)
+    #print(L.dtype, K.dtype)
 
 
     #############################
@@ -177,12 +198,12 @@ def diffusion_solver(X, C0, K, Tmax, dt, Q = 0, kw = 0, K_times = None):
 
         # Here, keep track of the disappeared mass.
         # Calculate outwards flux at time t
-        flux1 = kw*C[n,0]
+        flux1 = kw_now*C[n,0]
         #print('flux1 FVM: ', flux1, kw, C[n,0], dx)
         # Calculated biodegraded rate at time t
         biod1 = dx*Q*np.sum(C[n,:])
         # Calculate outwards flux at time t + dt
-        flux2 = kw*C[n+1,0]
+        flux2 = kw_now*C[n+1,0]
         # Calculated biodegraded rate at time t + dt
         biod2 = dx*Q*np.sum(C[n+1,:])
 
@@ -195,8 +216,26 @@ def diffusion_solver(X, C0, K, Tmax, dt, Q = 0, kw = 0, K_times = None):
 
         # If K is variable, recalculate system matrices
         if K_times is not None:
-            t = n*dt
-            i = np.argmin(np.abs(K_times - t))
-            L, R = get_system_matrices(Nx, dx, dt, K[:,i], Q, kw)
+            if kw_times is not None:
+                t = t0 + n*dt
+                if loop and (t >= kw_times[-1]):
+                    t -= 365*24*3600
+                i = np.searchsorted(kw_times, t)
+                kw_now = kw[i]
+            # loop back to beginning of diffusivity timeseries
+            t = t0 + n*dt
+            if loop and (t >= K_times[-1]):
+                t -= 365*24*3600
+            i = np.searchsorted(K_times, t)
+            L, R = get_system_matrices(Nx, dx, dt, K[i,:], Q, kw_now)
+
+        # Stop simulation if less than threshold remains dissolved
+        dissolved = np.sum(C[n+1,:])*dx
+        if dissolved < threshold:
+            # In this case, values will remain unchanged, fill remaining slots in array
+            evap[n+1:] = evap[n+1]
+            biod[n+1:] = biod[n+1]
+            C[n+1:,:] = C[n+1,:][None,:]
+            break
 
     return C, evap, biod

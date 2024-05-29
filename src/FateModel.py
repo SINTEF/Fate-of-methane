@@ -2,17 +2,19 @@
 # -*- coding: utf-8 -*-
 
 
-
+import os
 import numpy as np
+from tqdm import trange
 from scipy.interpolate import interp1d
 
 from DiffusionSolver import diffusion_solver
+from TamocWrapper import setup_ambient_profile, run_tamoc_sbm, parse_tamoc_sbm_results
 
 ############################################################
 #### Helper function for running an Eulerian simulation ####
 ############################################################
 
-def run_eulerian(depth, deposited, direct, z, K, halflife, kw, Tmax, K_times = None, dt = 3600, FVM=False, reaction_term_flux=True):
+def run_eulerian(depth, deposited, direct, z, K, halflife, kw, Tmax, K_times=None, kw_times=None, dt=3600, t0=0, loop=True, threshold=1e-7):
     '''
     Runs a simulation with the diffusion-reaction model, using
     results from Tamoc as initial conditions.
@@ -59,10 +61,13 @@ def run_eulerian(depth, deposited, direct, z, K, halflife, kw, Tmax, K_times = N
         assert len(K.shape) == 2
     else:
         assert len(K.shape) == 1
+    if kw_times is not None:
+        assert len(kw) == len(kw_times)
+
 
     # Interpolate the results of the Tamoc simulation
     # onto the grid for the Eulerian solver.
-    C0 = interp1d(depth[:], deposited[:], fill_value = 0.0, bounds_error = False, kind='cubic')(z)
+    C0 = interp1d(depth[:], deposited[:], fill_value='extrapolate', bounds_error = False, kind='linear')(z)
     # Normalise the initial concentration to be equal to dissolved fraction
     dz = z[1] - z[0] # Assuming fixed cell size
     C0 = (1-direct) * C0 / np.sum(C0*dz)
@@ -72,10 +77,10 @@ def run_eulerian(depth, deposited, direct, z, K, halflife, kw, Tmax, K_times = N
     Q = 1/lifetime
 
     # Run simulation
-    C, evap, biod = diffusion_solver(z, C0, K, Tmax, dt, kw = kw, Q = Q, K_times = K_times)
+    C, evap, biod = diffusion_solver(z, C0, K, Tmax, dt, kw = kw, Q = Q, K_times=K_times, kw_times=kw_times, t0=t0, loop=loop, threshold=threshold)
 
     # Create list of timesteps, for convenience in plotting, etc.
-    tc = np.linspace(0, Tmax, C.shape[0])
+    tc = np.linspace(t0, Tmax, C.shape[0])
 
     return C, evap, biod, tc
 
@@ -85,7 +90,7 @@ def run_eulerian(depth, deposited, direct, z, K, halflife, kw, Tmax, K_times = N
 ##########################################################
 
 
-def run_one_year(case, z0, d0, halflife, kw, startday = 0, datafolder = os.path.join('..', 'data'), Nz = 1001, dt = 3600):
+def run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input, K_input, K_times, dt=3600, Nz=None, additional_output=False):
     '''
     Function to run a simulation for one year, starting with a
     Tamoc simulation, and then one year of diffusion-reaction.
@@ -131,70 +136,50 @@ def run_one_year(case, z0, d0, halflife, kw, startday = 0, datafolder = os.path.
     '''
 
     # Set up grid and so on
-    # Creat grid for Eulerian diffusion-reaction solver
-    zc = np.linspace(0, z0, Nz)
-    # Simulation duration, in seconds
-    Tmax = 365 * (24*3600)
+    if Nz is None:
+        # use grid from input
+        zc = zc_input.copy()
+        # Assuming fixed cell size
+        dz = np.abs(zc[1:] - zc[:-1])
+        assert (np.amax(dz) - np.amin(dz)) < (np.amin(dz) * 1e-3)
+        dz = np.mean(dz)
+    else:
+        # Create grid for Eulerian diffusion-reaction solver
+        zf, dz = np.linspace(0, z0, Nz+1, retstep=True)
+        zc = zf[:-1] + dz/2
+    # End of simulation, in seconds
+    # Upping to twenty years
+    Tmax = t0 + 20 * 365 * (24*3600)
+    # Number of timesteps
+    Nt = int(Tmax / dt)
     # Biodegradation rate, converted from half-life
     Q = np.log(2) / halflife
 
-    # We're operating with a simplified year, of 365 days,
-    # with 183 days of summer, starting on April 1,
-    # and 182 days of winter, starting on October 1.
-    # A simulation will start on the given day of the year,
-    # run for the remainder of the current season, then switch
-    # to the other season, and finally switch back and run
-    # until 365 days is reached.
-    startday = int(startday)
-    assert (0 <= startday) and (startday < 365)
-    if (startday < 90) or (273 < startday):
-        seasons = ['winter', 'summer', 'winter']
-        # Simulation times, in seconds, for the different seasons
-        runtimes = (24*3600)*np.array([(90 - startday)%365, 183, (182 - (90 - startday)) % 365])
-    else:
-        seasons = ['summer', 'winter', 'summer']
-        runtimes = (24*3600)*np.array([273 - startday, 182, 183 - (273 - startday)])
-    assert sum(runtimes) == 365 * (24*3600)
-
+    # Get ambient profile for Tamoc
+    it = np.searchsorted(K_times, t0)
+    profile = setup_ambient_profile(zc_input, T_input[it,:], S_input[it,:])
+    # Hydrate formation time. inf => clean bubble
+    t_hyd = np.inf
     # Run Tamoc to get initial conditions
-    depth, deposited = run_tamoc(case, seasons[0], z0, d0)
-    # Take note of direct bubble transfer to surface
-    direct = 1 - simps(deposited[::-1], x = depth[::-1])
-    # Arrays with only one element, will be concatenated later
-    dissolved = np.array([1.0 - direct])
-    biodegraded = np.array([0.0])
-    evaporated = np.array([0.0])
-    timestamps = np.array([0.0])
+    bub, sbm = run_tamoc_sbm(z0, d0, profile, t_hyd=t_hyd)
+    depth, remaining, deposited, direct = parse_tamoc_sbm_results(sbm, z0)
 
-    # Run diffusion-reaction simulations in order, until 365 days is reached,
-    # providing the results of one simulation as input to the next.
-    t = 0 # Variable to keep track of time
-    for season, runtime in zip(seasons, runtimes):
-        # Get the diffusivity profile
-        K  = get_diffusivity(case, season, zc)
-        if t < Tmax:
-            t += runtime
-            C, evap, biod, tc = run_eulerian(depth, deposited, zc, K, halflife, kw, runtime, dt = dt)
-            # Concatenating arrays, skipping first element of next array,
-            # which is equal to last element of previous array.
-            dissolved = np.concatenate((dissolved, simps(C, x = zc, axis = 1)[1:]))
-            # These three will start again at 0 each time, so add the last value
-            # in the previous simulation.
-            biodegraded = np.concatenate((biodegraded, biod[1:] + biodegraded[-1]))
-            evaporated = np.concatenate((evaporated, evap[1:] + evaporated[-1]))
-            timestamps = np.concatenate((timestamps, tc[1:] + timestamps[-1]))
-            # Use last output as input next time around
-            depth = zc
-            deposited = C[-1,:]
+    t = t0 # Variable to keep track of time
+    C, evaporated, biodegraded, timestamps = run_eulerian(depth, deposited, direct, zc, K_input, halflife, kw, Tmax, dt=dt, t0=t0, K_times=K_times, loop=True)
 
+    # Integrate C to get dissolved fraction
+    dissolved = np.sum(dz * C, axis=1)
     # Convert direct bubble transfer to an array for consistency with the others,
     # even though it is constant in time
     direct = direct * np.ones_like(timestamps)
 
-    return direct, dissolved, biodegraded, evaporated, timestamps
+    if additional_output:
+        return direct, dissolved, biodegraded, evaporated, timestamps, C, deposited, depth
+    else:
+        return direct, dissolved, biodegraded, evaporated, timestamps
 
 
-def run_ensemble(case, z0, d0, halflife, kw, Nruns, datafolder = os.path.join('..', 'data'), Nz = 1001, dt = 3600, progressbar = True):
+def run_ensemble(z0, d0, halflife, kw, Nruns, zc_input, T_input, S_input, zf_input, K_input, K_times, Nz=None, dt=3600, progressbar=True):
     '''
     Function to run Nruns simulations, with evenly spaced startdays throughout a year.
 
@@ -249,14 +234,16 @@ def run_ensemble(case, z0, d0, halflife, kw, Nruns, datafolder = os.path.join('.
     dissolved_list = []
     biodegraded_list = []
     evaporated_list = []
+    tc_list = []
     # Loop over runs
     for i in iterator(Nruns):
-        startday = int(365*i/Nruns)
-        direct, dissolved, biodegraded, evaporated, tc = run_one_year(case, z0, d0, halflife, kw, startday = startday, Nz = Nz, dt = dt)
+        t0 = i * (3600*24*365/Nruns)
+        direct, dissolved, biodegraded, evaporated, tc = run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input, K_input, K_times, dt=dt, Nz=Nz)
         direct_list.append(direct)
         dissolved_list.append(dissolved)
         biodegraded_list.append(biodegraded)
         evaporated_list.append(evaporated)
+        tc_list.append(tc)
         # Timestamps will be the same for all simulations
         # (always starts at 0)
 
@@ -265,5 +252,6 @@ def run_ensemble(case, z0, d0, halflife, kw, Nruns, datafolder = os.path.join('.
     dissolved = np.array(dissolved_list)
     biodegraded = np.array(biodegraded_list)
     evaporated = np.array(evaporated_list)
+    tc = np.array(tc_list)
 
     return direct, dissolved, biodegraded, evaporated, tc
