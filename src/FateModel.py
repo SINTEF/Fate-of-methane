@@ -90,7 +90,7 @@ def run_eulerian(depth, deposited, direct, z, K, halflife, kw, Tmax, K_times=Non
 ##########################################################
 
 
-def run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input, K_input, K_times, dt=3600, Nz=None, additional_output=False):
+def run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input, K_input, K_times, kw_times=None, dt=3600, Nz=None, additional_output=False):
     '''
     Function to run a simulation for one year, starting with a
     Tamoc simulation, and then one year of diffusion-reaction.
@@ -165,7 +165,7 @@ def run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input,
     depth, remaining, deposited, direct = parse_tamoc_sbm_results(sbm, z0)
 
     t = t0 # Variable to keep track of time
-    C, evaporated, biodegraded, timestamps = run_eulerian(depth, deposited, direct, zc, K_input, halflife, kw, Tmax, dt=dt, t0=t0, K_times=K_times, loop=True)
+    C, evaporated, biodegraded, timestamps = run_eulerian(depth, deposited, direct, zc, K_input, halflife, kw, Tmax, kw_times=kw_times, dt=dt, t0=t0, K_times=K_times, loop=True)
 
     # Integrate C to get dissolved fraction
     dissolved = np.sum(dz * C, axis=1)
@@ -179,7 +179,7 @@ def run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input,
         return direct, dissolved, biodegraded, evaporated, timestamps
 
 
-def run_ensemble(z0, d0, halflife, kw, Nruns, zc_input, T_input, S_input, zf_input, K_input, K_times, Nz=None, dt=3600, progressbar=True):
+def run_ensemble(z0, d0, halflife, kw, Nruns, zc_input, T_input, S_input, zf_input, K_input, K_times, kw_times=None, Nz=None, dt=3600, progressbar=True):
     '''
     Function to run Nruns simulations, with evenly spaced startdays throughout a year.
 
@@ -223,6 +223,10 @@ def run_ensemble(z0, d0, halflife, kw, Nruns, zc_input, T_input, S_input, zf_inp
         1D array containing time coordinates for the four other vectors.
     '''
 
+    # Some checks on inputs
+    if isinstance(kw, np.ndarray):
+        assert len(kw) == len(kw_times)
+
     # Use progress bar if indicated.
     if progressbar:
         iterator = trange
@@ -238,7 +242,7 @@ def run_ensemble(z0, d0, halflife, kw, Nruns, zc_input, T_input, S_input, zf_inp
     # Loop over runs
     for i in iterator(Nruns):
         t0 = i * (3600*24*365/Nruns)
-        direct, dissolved, biodegraded, evaporated, tc = run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input, K_input, K_times, dt=dt, Nz=Nz)
+        direct, dissolved, biodegraded, evaporated, tc = run_one_year(z0, d0, t0, halflife, kw, zc_input, T_input, S_input, zf_input, K_input, K_times, dt=dt, Nz=Nz, kw_times=kw_times)
         direct_list.append(direct)
         dissolved_list.append(dissolved)
         biodegraded_list.append(biodegraded)

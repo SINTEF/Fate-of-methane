@@ -142,17 +142,8 @@ def diffusion_solver(X, C0, K, Tmax, dt, t0=0, Q=0, kw=0, K_times=None, kw_times
 
     # Numerical parameters
     dx = X[1] - X[0]
-
     Nx = X.size
     Nt = int((Tmax - t0) / dt)
-
-    #print('Diffusionsolver')
-    #print(dx)
-    #print(X)
-    #print(C0)
-    #print(K)
-    #print(t0)
-    #print(Tmax)
 
     # 2D array to hold concetration results
     C      = np.zeros((Nt+1, Nx))
@@ -160,6 +151,7 @@ def diffusion_solver(X, C0, K, Tmax, dt, t0=0, Q=0, kw=0, K_times=None, kw_times
     evap   = np.zeros(Nt+1)
     biod   = np.zeros(Nt+1)
 
+    # Set mass transfer coeffecient
     if kw_times is None:
         # In this case, kw is a float
         kw_now = kw
@@ -167,27 +159,26 @@ def diffusion_solver(X, C0, K, Tmax, dt, t0=0, Q=0, kw=0, K_times=None, kw_times
         # In this case, kw is an array
         i = np.argmin(np.abs(kw_times-t0))
         kw_now = kw[i]
-    # System matrices for Crank-Nicolson solver
+
+    # Set vertical eddy diffusivity
     if K_times is None:
         # In this case, K is a 1D array
-        L, R = get_system_matrices(Nx, dx, dt, K, Q, kw_now)
+        K_now = K
     else:
         # In this case, K is a 2D array
         i = np.argmin(np.abs(K_times-t0))
-        L, R = get_system_matrices(Nx, dx, dt, K[i,:], Q, kw_now)
+        K_now = K[i,:]
 
-    #print('Trace L = ', np.sum(L.diagonal(0)))
-    #print('Trace R = ', np.sum(R.diagonal(0)))
-    #print(Nx, dx, dt, np.sum(K[i,:]), Q, kw)
-    #print(L.dtype, K.dtype)
+    # Calculate system matrices for Crank-Nicolson
+    L, R = get_system_matrices(Nx, dx, dt, K_now, Q, kw_now)
 
+    # Initialise concentration
+    C[0,:] = C0
 
     #############################
     ####    Loop over time   ####
     #############################
 
-    # Initialise concentration
-    C[0,:] = C0
     for n in range(Nt):
 
         # Solve matrix system, using iterative methods
@@ -207,27 +198,34 @@ def diffusion_solver(X, C0, K, Tmax, dt, t0=0, Q=0, kw=0, K_times=None, kw_times
         # Calculated biodegraded rate at time t + dt
         biod2 = dx*Q*np.sum(C[n+1,:])
 
-       # print(n, flux1, flux2, C[n,0], C[n+1,0])
-
         # Store time-averaged values over two timesteps
         # (cumulative amounts)
         evap[n+1] = evap[n] + dt * (flux1 + flux2) / 2
         biod[n+1] = biod[n] + dt * (biod1 + biod2) / 2
 
-        # If K is variable, recalculate system matrices
+        # If K or kw are variable, recalculate system matrices
+        recalculate = False
         if K_times is not None:
-            if kw_times is not None:
-                t = t0 + n*dt
-                if loop and (t >= kw_times[-1]):
-                    t -= 365*24*3600
-                i = np.searchsorted(kw_times, t)
-                kw_now = kw[i]
             # loop back to beginning of diffusivity timeseries
             t = t0 + n*dt
-            if loop and (t >= K_times[-1]):
-                t -= 365*24*3600
-            i = np.searchsorted(K_times, t)
-            L, R = get_system_matrices(Nx, dx, dt, K[i,:], Q, kw_now)
+            if loop:
+                t = t % (365*24*3600)
+            iK = np.searchsorted(K_times, t)
+            if iK == K.shape[0]:
+                iK = 0
+            K_now = K[iK,:]
+            recalculate = True
+        if kw_times is not None:
+            t = t0 + n*dt
+            if loop:
+                t = t % (365*24*3600)
+            ikw = np.searchsorted(kw_times, t)
+            if ikw >= len(kw):
+                ikw = 0
+            kw_now = kw[ikw]
+        if recalculate:
+            # Recalculate system matrices with new diffusivity and Kw
+            L, R = get_system_matrices(Nx, dx, dt, K_now, Q, kw_now)
 
         # Stop simulation if less than threshold remains dissolved
         dissolved = np.sum(C[n+1,:])*dx
